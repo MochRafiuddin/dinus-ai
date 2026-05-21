@@ -7,7 +7,7 @@ import cv2
 import base64
 import json
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # Me-load model custom milikmu yang sudah tertanam di image
 models = {
@@ -229,7 +229,21 @@ def handler(job):
                 orig_filename = ""
                 if image_url:
                     try:
-                        orig_filename = os.path.basename(urlparse(image_url).path)
+                        parsed = urlparse(image_url)
+                        qs = parse_qs(parsed.query)
+                        if 'url' in qs and qs['url']:
+                            orig_filename = os.path.basename(qs['url'][0])
+                        if not orig_filename or '.' not in orig_filename:
+                            orig_filename = os.path.basename(parsed.path)
+                        if not orig_filename or '.' not in orig_filename:
+                            for val in qs.values():
+                                for v in val:
+                                    fn = os.path.basename(str(v))
+                                    if fn and '.' in fn:
+                                        orig_filename = fn
+                                        break
+                                if orig_filename and '.' in orig_filename:
+                                    break
                     except Exception:
                         pass
                 
