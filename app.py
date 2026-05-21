@@ -5,6 +5,9 @@ import os
 import datetime
 import cv2
 import base64
+import json
+import time
+from urllib.parse import urlparse
 
 # Me-load model custom milikmu yang sudah tertanam di image
 models = {
@@ -78,6 +81,7 @@ def handler(job):
         return {"status": "error", "message": "Input 'images' atau 'image_url' tidak ditemukan."}
         
     results_list = []
+    annotated_buffers = {}
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -154,9 +158,11 @@ def handler(job):
             # Urutkan dan kelompokkan deteksi
             grouped_detections = group_boxes_into_rows(detections)
             
-            # Konversi gambar hasil anotasi ke base64
+            # Konversi gambar hasil anotasi ke base64 / buffer
             _, buffer = cv2.imencode('.jpg', img)
-            img_base64 = base64.b64encode(buffer).decode('utf-8')
+            if buffer is not None:
+                annotated_buffers[idx] = buffer.tobytes()
+            # img_base64 = base64.b64encode(buffer).decode('utf-8')
             
             res_item = {
                 "image_url": url,
@@ -164,7 +170,7 @@ def handler(job):
                 "status": "success",
                 "total_detected": len(detections),
                 "detections_grouped": grouped_detections,
-                "image_base64": img_base64
+                # "image_base64": img_base64
             }
             for k, v in item.items():
                 if k not in res_item:
@@ -214,18 +220,31 @@ def handler(job):
         
         for idx, res in enumerate(results_list):
             meta = res.copy()
-            if "image_base64" in meta:
-                # Kita hapus string base64-nya karena diganti kirim file langsung
-                del meta["image_base64"] 
             metadata_results.append(meta)
             
-            # Ambal data OpenCV biner gambar yang tadi sudah di-encode
-            if res.get("status") == "success" and "image_base64" in res:
-                _, buffer = cv2.imencode('.jpg', img) # Menggunakan instance img terkait
-                # Buat nama file unik untuk field form-data key nya
+            # Ambil data OpenCV biner gambar yang tadi sudah di-encode
+            if res.get("status") == "success" and idx in annotated_buffers:
+                # Buat nama file dengan nama asli dari server + _ai
+                image_url = res.get('image_url', '')
+                orig_filename = ""
+                if image_url:
+                    try:
+                        orig_filename = os.path.basename(urlparse(image_url).path)
+                    except Exception:
+                        pass
+                
+                if not orig_filename or '.' not in orig_filename:
+                    filename = f"image_{idx + 1}_ai.jpg"
+                else:
+                    name, ext = os.path.splitext(orig_filename)
+                    clean_name = "".join(c for c in name if c.isalnum() or c in '_-')
+                    clean_ext = "".join(c for c in ext if c.isalnum() or c == '.')
+                    if not clean_ext or clean_ext == '.':
+                        clean_ext = '.jpg'
+                    filename = f"{clean_name}_ai{clean_ext}"
+                
                 file_key = f"file_{idx}"
-                filename = f"detected_{idx}_{timestamp}.jpg"
-                files_payload[file_key] = (filename, buffer.tobytes(), 'image/jpeg')
+                files_payload[file_key] = (filename, annotated_buffers[idx], 'image/jpeg')
 
         final_result["results"] = metadata_results
         
