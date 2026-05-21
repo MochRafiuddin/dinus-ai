@@ -37,6 +37,7 @@ def group_boxes_into_rows(boxes, threshold=100):
         return []
 
 def handler(job):
+    start_time = datetime.datetime.now().timestamp()
     job_input = job.get('input', {})
     
     # Payload baru: list of objects [{"url": "...", "type": "chompchomp"}]
@@ -52,10 +53,10 @@ def handler(job):
     if images_input and isinstance(images_input, list):
         for img in images_input:
             if isinstance(img, dict) and img.get('url'):
-                urls_to_process.append({
-                    "url": img['url'].strip(),
-                    "type": img.get('type', 'chompchomp').strip()
-                })
+                item = img.copy()
+                item["url"] = img['url'].strip()
+                item["type"] = img.get('type', 'chompchomp').strip()
+                urls_to_process.append(item)
     else:
         # Normalisasi backward compatibility
         temp_urls = []
@@ -105,12 +106,16 @@ def handler(job):
             # 1. Download gambar sementara dari URL
             response = requests.get(url, headers=headers, stream=True, timeout=15)
             if response.status_code != 200:
-                results_list.append({
+                res_item = {
                     "image_url": url,
                     "type": model_type,
                     "status": "error",
                     "message": f"Gagal mendownload gambar dari URL. Status code: {response.status_code}"
-                })
+                }
+                for k, v in item.items():
+                    if k not in res_item:
+                        res_item[k] = v
+                results_list.append(res_item)
                 continue
                 
             with open(temp_image_path, 'wb') as f:
@@ -153,22 +158,30 @@ def handler(job):
             _, buffer = cv2.imencode('.jpg', img)
             img_base64 = base64.b64encode(buffer).decode('utf-8')
             
-            results_list.append({
+            res_item = {
                 "image_url": url,
                 "type": model_type,
                 "status": "success",
                 "total_detected": len(detections),
                 "detections_grouped": grouped_detections,
                 "image_base64": img_base64
-            })
+            }
+            for k, v in item.items():
+                if k not in res_item:
+                    res_item[k] = v
+            results_list.append(res_item)
             
         except Exception as e:
-            results_list.append({
+            res_item = {
                 "image_url": url,
                 "type": model_type,
                 "status": "error",
                 "message": str(e)
-            })
+            }
+            for k, v in item.items():
+                if k not in res_item:
+                    res_item[k] = v
+            results_list.append(res_item)
         finally:
             # Pastikan file temporary selalu terhapus setelah selesai diproses
             if os.path.exists(temp_image_path):
@@ -177,22 +190,56 @@ def handler(job):
                 except Exception as clean_e:
                     print(f"Gagal menghapus file temporary {temp_image_path}: {clean_e}")
                     
+    end_time = datetime.datetime.now().timestamp()
     # Susun payload hasil akhir
     final_result = {
         "job_id": job.get('id'),
         "requests": job_input,
         "status": "success",
-        "results": results_list
+        "results": results_list,
+        "start_time": start_time,
+        "end_time": end_time,
+        "exec_time": end_time - start_time
     }
     
     # 4. Kirim hasil melalui callback API jika disediakan callback_url
     if callback_url and isinstance(callback_url, str) and callback_url.strip():
         callback_sent = False
         callback_error = None
-        # Coba mengirim data dengan retry up to 3 kali jika ada kegagalan jaringan
+        
+        # Siapkan text data (JSON metadata dimasukkan ke field 'data')
+        # Hapus field 'image_base64' dari list metadata JSON agar payload tidak ganda
+        metadata_results = []
+        files_payload = {}
+        
+        for idx, res in enumerate(results_list):
+            meta = res.copy()
+            if "image_base64" in meta:
+                # Kita hapus string base64-nya karena diganti kirim file langsung
+                del meta["image_base64"] 
+            metadata_results.append(meta)
+            
+            # Ambal data OpenCV biner gambar yang tadi sudah di-encode
+            if res.get("status") == "success" and "image_base64" in res:
+                _, buffer = cv2.imencode('.jpg', img) # Menggunakan instance img terkait
+                # Buat nama file unik untuk field form-data key nya
+                file_key = f"file_{idx}"
+                filename = f"detected_{idx}_{timestamp}.jpg"
+                files_payload[file_key] = (filename, buffer.tobytes(), 'image/jpeg')
+
+        final_result["results"] = metadata_results
+        
+        # Coba mengirim data dengan multipart/form-data via requests
         for attempt in range(3):
             try:
-                resp = requests.post(callback_url.strip(), json=final_result, timeout=20)
+                # Kirim metadata JSON sebagai string di form field 'metadata'
+                # Dan kirim gambar biner di parameter 'files'
+                resp = requests.post(
+                    callback_url.strip(), 
+                    data={"metadata": json.dumps(final_result)}, 
+                    files=files_payload,
+                    timeout=30
+                )
                 if resp.status_code in [200, 201, 202, 204]:
                     callback_sent = True
                     break
@@ -200,6 +247,7 @@ def handler(job):
                     callback_error = f"HTTP {resp.status_code}"
             except Exception as cb_e:
                 callback_error = str(cb_e)
+                time.sleep(1)
         
         final_result["callback_status"] = {
             "sent": callback_sent,
