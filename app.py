@@ -42,6 +42,7 @@ def group_boxes_into_rows(boxes, threshold=100):
 def handler(job):
     start_time = datetime.datetime.now().timestamp()
     job_input = job.get('input', {})
+    job_id = job.get('id', 'unknown_job')
     
     # Payload baru: list of objects [{"url": "...", "type": "chompchomp"}]
     images_input = job_input.get('images', [])
@@ -59,6 +60,8 @@ def handler(job):
                 item = img.copy()
                 item["url"] = img['url'].strip()
                 item["type"] = img.get('type', 'chompchomp').strip()
+                # Pastikan aman jika key ini tidak dikirim dari front-end
+                item["itinerary_history_detail_id"] = img.get('itinerary_history_detail_id')
                 urls_to_process.append(item)
     else:
         # Normalisasi backward compatibility
@@ -74,7 +77,8 @@ def handler(job):
         for url in temp_urls:
             urls_to_process.append({
                 "url": url,
-                "type": "chompchomp" # Default fallback
+                "type": "chompchomp", # Default fallback
+                "itinerary_history_detail_id": None
             })
         
     if not urls_to_process:
@@ -82,6 +86,7 @@ def handler(job):
         
     results_list = []
     annotated_buffers = {}
+    files_payload = {}  # Inisialisasi payload file agar tidak NameError
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -89,6 +94,7 @@ def handler(job):
     for idx, item in enumerate(urls_to_process):
         url = item['url']
         model_type = item['type']
+        itinerary_history_detail_id = item['itinerary_history_detail_id']
         
         # Validasi tipe model
         if model_type not in models:
@@ -162,7 +168,22 @@ def handler(job):
             _, buffer = cv2.imencode('.jpg', img)
             if buffer is not None:
                 annotated_buffers[idx] = buffer.tobytes()
-            # img_base64 = base64.b64encode(buffer).decode('utf-8')
+            
+            # --- PROSES EKSTRAKSI & MODIFIKASI NAMA FILE ---
+            # Mengambil "itinerary_history_1545_1_1_18-05-2026_16_58_45_672.jpg" dari URL
+            filename_from_url = url.split('/')[-1] 
+            
+            # Memisahkan nama file dan ekstensinya
+            name, ext = os.path.splitext(filename_from_url)
+            if not ext:
+                ext = '.jpg'
+                
+            # Menggabungkan menjadi format: nama_file_ai.jpg
+            ai_filename = f"{name}_ai{ext}"
+            
+            # Daftarkan ke payload untuk dikirim lewat multipart form-data
+            file_key = f"file_{idx}"
+            files_payload[file_key] = (ai_filename, annotated_buffers[idx], 'image/jpeg')
             
             res_item = {
                 "image_url": url,
@@ -170,7 +191,9 @@ def handler(job):
                 "status": "success",
                 "total_detected": len(detections),
                 "detections_grouped": grouped_detections,
-                # "image_base64": img_base64
+                "itinerary_history_detail_id": itinerary_history_detail_id,
+                # --- HASIL SESUAI KEINGINAN ANDA ---
+                "image_result_ai": f"results/{job_id}/{ai_filename}"
             }
             for k, v in item.items():
                 if k not in res_item:
@@ -182,7 +205,9 @@ def handler(job):
                 "image_url": url,
                 "type": model_type,
                 "status": "error",
-                "message": str(e)
+                "message": str(e),
+                "itinerary_history_detail_id": itinerary_history_detail_id,
+                "image_result_ai": None
             }
             for k, v in item.items():
                 if k not in res_item:
@@ -199,7 +224,7 @@ def handler(job):
     end_time = datetime.datetime.now().timestamp()
     # Susun payload hasil akhir
     final_result = {
-        "job_id": job.get('id'),
+        "job_id": job_id,
         "requests": job_input,
         "status": "success",
         "results": results_list,
@@ -213,64 +238,12 @@ def handler(job):
         callback_sent = False
         callback_error = None
         
-        # Siapkan text data (JSON metadata dimasukkan ke field 'data')
-        # Hapus field 'image_base64' dari list metadata JSON agar payload tidak ganda
-        metadata_results = []
-        files_payload = {}
-        
-        for idx, res in enumerate(results_list):
-            meta = res.copy()
-            metadata_results.append(meta)
-            
-            # Ambil data OpenCV biner gambar yang tadi sudah di-encode
-            if res.get("status") == "success" and idx in annotated_buffers:
-                # Buat nama file dengan nama asli dari server + _ai
-                image_url = res.get('image_url', '')
-                orig_filename = ""
-                if image_url:
-                    try:
-                        parsed = urlparse(image_url)
-                        qs = parse_qs(parsed.query)
-                        if 'url' in qs and qs['url']:
-                            orig_filename = os.path.basename(qs['url'][0])
-                        if not orig_filename or '.' not in orig_filename:
-                            orig_filename = os.path.basename(parsed.path)
-                        if not orig_filename or '.' not in orig_filename:
-                            for val in qs.values():
-                                for v in val:
-                                    fn = os.path.basename(str(v))
-                                    if fn and '.' in fn:
-                                        orig_filename = fn
-                                        break
-                                if orig_filename and '.' in orig_filename:
-                                    break
-                    except Exception:
-                        pass
-                
-                if not orig_filename or '.' not in orig_filename:
-                    filename = f"image_{idx + 1}_ai.jpg"
-                else:
-                    name, ext = os.path.splitext(orig_filename)
-                    clean_name = "".join(c for c in name if c.isalnum() or c in '_-')
-                    clean_ext = "".join(c for c in ext if c.isalnum() or c == '.')
-                    if not clean_ext or clean_ext == '.':
-                        clean_ext = '.jpg'
-                    filename = f"{clean_name}_ai{clean_ext}"
-                
-                file_key = f"file_{idx}"
-                files_payload[file_key] = (filename, annotated_buffers[idx], 'image/jpeg')
-
-        final_result["results"] = metadata_results
-        
-        # Coba mengirim data dengan multipart/form-data via requests
         for attempt in range(3):
             try:
-                # Kirim metadata JSON sebagai string di form field 'metadata'
-                # Dan kirim gambar biner di parameter 'files'
                 resp = requests.post(
                     callback_url.strip(), 
                     data={"metadata": json.dumps(final_result)}, 
-                    files=files_payload,
+                    files=files_payload,  # Berhasil dikirim karena sudah di-define di atas
                     timeout=30
                 )
                 if resp.status_code in [200, 201, 202, 204]:
@@ -288,6 +261,5 @@ def handler(job):
         }
         
     return final_result
-
 # Jalankan RunPod serverless worker
 runpod.serverless.start({"handler": handler})
