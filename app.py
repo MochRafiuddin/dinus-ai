@@ -149,11 +149,23 @@ def handler(job):
                     confidence = float(box.conf[0])
                     class_id = int(box.cls[0])
                     class_name = model.names[class_id]
-                    
+                    if confidence < 0.53:
+                        continue
                     # Anotasi pada gambar
                     cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     label = f"{class_name} {confidence:.2f}"
-                    cv2.putText(img, label, (int(x1), int(y1) + 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
+                    # Ukuran font dinamis berdasarkan lebar box relatif terhadap gambar
+                    img_h, img_w = img.shape[:2]
+                    box_w = x2 - x1
+                    font_scale = max(0.25, min(0.5, (box_w / img_w) * 2.5))
+                    thickness = max(1, int(font_scale * 1.5))
+                    
+                    # Background label agar teks mudah dibaca
+                    (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+                    label_y = max(int(y1) - 4, th + 4)
+                    cv2.rectangle(img, (int(x1), label_y - th - baseline), (int(x1) + tw, label_y + baseline), (0, 0, 0), cv2.FILLED)
+                    cv2.putText(img, label, (int(x1), label_y - baseline), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), thickness)
                     
                     detections.append({
                         "object": class_name,
